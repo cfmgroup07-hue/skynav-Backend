@@ -10,7 +10,7 @@ import seedVisaData from './src/utils/seedVisaData.js';
 // CONFIGURATION
 // ==========================================
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5005;
 
 // ==========================================
 // DATABASE CONNECTION
