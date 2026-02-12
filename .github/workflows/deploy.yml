@@ -1,45 +1,136 @@
-name: Deploy Backend
+name: Deploy Backend to VPS
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
-
-      - name: Setup Node
-        uses: actions/setup-node@v3
-        with:
-          node-version: 20
-
-      - name: Install Dependencies
-        run: npm ci
-
-      - name: Deploy Backend Files
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USERNAME }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          source: "*"
-          target: ${{ secrets.VPS_BACKEND_PATH }}
-
-      - name: Restart Backend with PM2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USERNAME }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            cd ${{ secrets.VPS_BACKEND_PATH }}
-            npm install
-            pm2 delete skynav-backend || true
+    - name: Checkout code
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch all history for git pull
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run tests
+      run: npm test -- --passWithNoTests
+      continue-on-error: true
+    
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@v1.0.0
+      env:
+        MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+        AMADEUS_API_KEY: ${{ secrets.AMADEUS_API_KEY }}
+        AMADEUS_API_SECRET: ${{ secrets.AMADEUS_API_SECRET }}
+        FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: ${{ secrets.VPS_USERNAME }}
+        key: ${{ secrets.VPS_SSH_KEY }}
+        port: ${{ secrets.VPS_PORT || '22' }}
+        envs: MONGODB_URI,JWT_SECRET,RAPIDAPI_KEY,AMADEUS_API_KEY,AMADEUS_API_SECRET,FRONTEND_URL
+        script: |
+          # Navigate to backend directory
+          cd /var/www/skynav/backend || exit 1
+          
+          # Store current commit hash for rollback
+          CURRENT_COMMIT=$(git rev-parse HEAD)
+          echo "Current commit: $CURRENT_COMMIT"
+          
+          # Pull latest changes
+          echo "🔄 Pulling latest changes..."
+          git fetch origin
+          git reset --hard origin/main || git reset --hard origin/master
+          git clean -fd
+          
+          # Show what changed
+          echo "📋 Latest commits:"
+          git log -3 --pretty=format:"%h - %an, %ar : %s"
+          
+          # Install dependencies
+          echo "📦 Installing dependencies..."
+          npm ci --production || npm install --production
+          
+          # Update .env file with secrets
+          echo "🔧 Updating environment variables..."
+          cat > .env << ENVEOF
+PORT=5001
+NODE_ENV=production
+MONGODB_URI=$MONGODB_URI
+JWT_SECRET=$JWT_SECRET
+JWT_EXPIRE=7d
+FRONTEND_URL=$FRONTEND_URL
+CLIENT_URL=$FRONTEND_URL
+RAPIDAPI_KEY=$RAPIDAPI_KEY
+AMADEUS_API_KEY=$AMADEUS_API_KEY
+AMADEUS_API_SECRET=$AMADEUS_API_SECRET
+ENVEOF
+          
+          # Test the application
+          echo "🧪 Testing application..."
+          npm test -- --passWithNoTests || echo "⚠️ Tests failed but continuing..."
+          
+          # Restart with PM2
+          echo "🚀 Restarting application..."
+          if pm2 list | grep -q "skynav-backend"; then
+            pm2 restart skynav-backend --update-env
+          else
             pm2 start server.js --name skynav-backend
-            pm2 save
-
+          fi
+          pm2 save
+          
+          # Wait for app to start
+          sleep 5
+          
+          # Health check
+          echo "🏥 Performing health check..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5001/health)
+          if [ $HTTP_CODE -eq 200 ]; then
+            echo "✅ Health check passed! (Status: $HTTP_CODE)"
+          else
+            echo "❌ Health check failed! (Status: $HTTP_CODE)"
+            echo "⚠️ Rolling back to previous commit..."
+            git reset --hard $CURRENT_COMMIT
+            pm2 restart skynav-backend
+            exit 1
+          fi
+          
+          # Show PM2 status
+          echo "📊 PM2 Status:"
+          pm2 show skynav-backend
+          pm2 list
+          
+          echo "✅ Backend deployment completed successfully!"
+    
+    - name: Send deployment notification
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const status = context.payload.action || 'completed';
+          const success = '${{ job.status }}' === 'success';
+          const message = success ? '✅ Backend deployed successfully!' : '❌ Backend deployment failed!';
+          
+          // Create commit comment
+          await github.rest.repos.createCommitComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            commit_sha: context.sha,
+            body: `${message}\nDeployment Time: ${new Date().toISOString()}\nStatus: ${{ job.status }}`
+          });
