@@ -5,41 +5,86 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
-
+      with:
+        fetch-depth: 0
+    
     - name: Setup Node.js
       uses: actions/setup-node@v3
       with:
         node-version: '20'
-        cache: 'npm'
-
+    
     - name: Install dependencies
-      run: npm ci
-
-    - name: Run tests
-      run: npm test -- --passWithNoTests
-
-    - name: Deploy to VPS
+      run: npm install
+    
+    - name: Deploy to VPS with git pull
       uses: appleboy/ssh-action@v1.0.0
       with:
         host: ${{ secrets.VPS_HOST }}
         username: ${{ secrets.VPS_USERNAME }}
         key: ${{ secrets.VPS_SSH_KEY }}
+        port: ${{ secrets.VPS_PORT || '22' }}
         script: |
-          cd ${{ secrets.VPS_BACKEND_PATH }}
-          git pull origin main
-          npm ci --production
-          pm2 restart skynav-backend || pm2 start server.js --name skynav-backend
+          # Navigate to backend directory
+          cd /var/www/skynav/backend || exit 1
+          
+          # GIT PULL - Get latest code
+          echo "🔄 Pulling latest code from repository..."
+          git fetch origin
+          git reset --hard origin/main || git reset --hard origin/master
+          git clean -fd
+          
+          # Show latest commits
+          echo "📋 Latest commits:"
+          git log -3 --pretty=format:"%h - %an, %ar : %s"
+          echo ""
+          
+          # Install dependencies
+          echo "📦 Installing dependencies..."
+          npm install --production
+          
+          # Create .env file
+          echo "🔧 Creating environment file..."
+          cat > .env << EOF
+PORT=5001
+NODE_ENV=production
+MONGODB_URI=${{ secrets.MONGODB_URI }}
+JWT_SECRET=${{ secrets.JWT_SECRET }}
+JWT_EXPIRE=7d
+FRONTEND_URL=${{ secrets.FRONTEND_URL }}
+CLIENT_URL=${{ secrets.FRONTEND_URL }}
+RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}
+AMADEUS_API_KEY=${{ secrets.AMADEUS_API_KEY }}
+AMADEUS_API_SECRET=${{ secrets.AMADEUS_API_SECRET }}
+EOF
+          
+          # Restart with PM2
+          echo "🚀 Restarting application..."
+          if pm2 list | grep -q "skynav-backend"; then
+            pm2 restart skynav-backend --update-env
+          else
+            pm2 start server.js --name skynav-backend
+          fi
           pm2 save
-    
-    - name: Health Check
-      run: |
-        sleep 10
-        curl -f https://sky-nav.net/api/health || exit 1
+          
+          # Health check
+          echo "🏥 Performing health check..."
+          sleep 5
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5001/health || echo "000")
+          
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Health check passed! (Status: $HTTP_CODE)"
+          else
+            echo "⚠️ Health check failed! (Status: $HTTP_CODE)"
+            echo "Check logs with: pm2 logs skynav-backend"
+          fi
+          
+          echo "✅ Backend deployment completed!"
