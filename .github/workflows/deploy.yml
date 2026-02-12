@@ -1,155 +1,52 @@
-name: 🚀 Deploy SkyNav Backend to Production
+name: Deploy SkyNav Backend
 
 on:
   push:
-    branches: [main, master, production]
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - 'LICENSE'
-  pull_request:
     branches: [main, master]
-    types: [closed]
-  workflow_dispatch:  # Allow manual trigger
-
-env:
-  NODE_VERSION: '20'
-  PM2_NAME: 'skynav-backend'
+  workflow_dispatch:
 
 jobs:
-  test:
-    name: 🧪 Test & Lint
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@v4
-      
-      - name: 🔧 Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-      
-      - name: 📦 Install dependencies
-        run: npm ci
-      
-      - name: 🔍 Run linter
-        run: npm run lint || echo "No linter configured"
-      
-      - name: ✅ Run tests
-        run: npm test || echo "No tests configured"
-        
-      - name: 🔐 Security audit
-        run: npm audit --production || echo "Security audit skipped"
-
   deploy:
-    name: 🚀 Deploy to VPS
-    needs: test
-    if: github.event_name == 'push' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    
     steps:
-      - name: 📥 Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: 🔧 Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-      
-      - name: 📦 Install dependencies
-        run: npm ci --production
-      
-      - name: 📦 Create deployment package
-        run: |
-          mkdir -p deploy
-          cp -r node_modules server.js package.json src deploy/
-          cp .env.example deploy/.env || echo "No .env.example found"
-          tar -czf backend.tar.gz deploy/
-      
-      - name: 📤 Copy files to VPS
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USERNAME }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || '22' }}
-          source: "backend.tar.gz"
-          target: "/tmp/"
-      
-      - name: 🔄 Deploy to VPS
+          node-version: 20
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || '22' }}
           script: |
-            # Create backup
-            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-            if [ -d "${{ secrets.VPS_BACKEND_PATH }}" ]; then
-              cp -r ${{ secrets.VPS_BACKEND_PATH }} ${{ secrets.VPS_BACKEND_PATH }}_backup_$TIMESTAMP
-            fi
+            # Create project directory
+            mkdir -p /var/www/skynav/backend
             
-            # Extract new files
-            mkdir -p ${{ secrets.VPS_BACKEND_PATH }}
-            tar -xzf /tmp/backend.tar.gz -C /tmp/
-            cp -rf /tmp/deploy/* ${{ secrets.VPS_BACKEND_PATH }}/
-            rm -rf /tmp/deploy /tmp/backend.tar.gz
-            
-            # Setup environment
-            cd ${{ secrets.VPS_BACKEND_PATH }}
-            
-            # Create .env file from secrets
-            echo "NODE_ENV=production" > .env
-            echo "PORT=5000" >> .env
-            echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" >> .env
-            echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> .env
-            echo "JWT_EXPIRE=7d" >> .env
-            echo "RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}" >> .env
-            echo "AMADEUS_API_KEY=${{ secrets.AMADEUS_API_KEY }}" >> .env
-            echo "AMADEUS_API_SECRET=${{ secrets.AMADEUS_API_SECRET }}" >> .env
-            echo "FRONTEND_URL=https://sky-nav.net" >> .env
-            
-            # Install production dependencies
-            npm ci --production --silent
-            
-            # Setup PM2
-            if pm2 list | grep -q "${{ env.PM2_NAME }}"; then
-              pm2 restart ${{ env.PM2_NAME }}
+            # Clone or pull latest code
+            if [ -d "/var/www/skynav/backend/.git" ]; then
+              cd /var/www/skynav/backend
+              git pull origin main
             else
-              pm2 start server.js --name ${{ env.PM2_NAME }}
+              cd /var/www/skynav
+              rm -rf backend
+              git clone https://github.com/cfmgroup07-hue/skynav-Backend.git backend
+              cd backend
             fi
-            pm2 save
             
-            # Keep last 3 backups, remove older ones
-            ls -d ${{ secrets.VPS_BACKEND_PATH }}_backup_* 2>/dev/null | sort | head -n -3 | xargs rm -rf || true
-      
-      - name: 🏥 Health check
-        run: |
-          sleep 15
-          for i in {1..5}; do
-            if curl -s -f -I https://sky-nav.net/api/health; then
-              echo "✅ Health check passed"
-              exit 0
-            fi
-            echo "⏳ Waiting for service to start... ($i/5)"
-            sleep 5
-          done
-          echo "❌ Health check failed"
-          exit 1
-      
-      - name: 💬 Discord notification
-        if: always()
-        uses: nobrayner/discord-webhook@v1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          discord-webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          title: "SkyNav Backend Deployment"
-          description: |
-            **Status:** ${{ job.status }}
-            **Branch:** ${{ github.ref_name }}
-            **Commit:** ${{ github.sha }}
-            **Author:** ${{ github.actor }}
-          color: ${{ job.status == 'success' && 3066993 || 15158332 }}
+            # Install dependencies
+            npm install --production
+            
+            # Create .env file
+            cat > .env << EOF
+            
+            npm install -g pm2
+            pm2 delete skynav-backend || true
+            pm2 start server.js --name skynav-backend
+            pm2 save
+            pm2 startup
