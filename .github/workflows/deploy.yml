@@ -1,61 +1,76 @@
-name: Deploy SkyNav Backend
+name: Deploy Backend to VPS
 
 on:
   push:
-    branches: [main, master]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          
-      - name: Install dependencies
-        run: npm install
-        
-      - name: Deploy to VPS
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USERNAME }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            # Create project directory
-            mkdir -p /var/www/skynav/backend
-            
-            # Clone or pull latest code
-            if [ -d "/var/www/skynav/backend/.git" ]; then
-              cd /var/www/skynav/backend
-              git pull origin main
-            else
-              cd /var/www/skynav
-              rm -rf backend
-              git clone https://github.com/cfmgroup07-hue/skynav-Backend.git backend
-              cd backend
-            fi
-            
-            # Install dependencies
-            npm install --production
-            
-            # Create .env file using echo (NO YAML INDENTATION ISSUES)
-            echo "NODE_ENV=production" > .env
-            echo "PORT=5000" >> .env
-            echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" >> .env
-            echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> .env
-            echo "JWT_EXPIRE=7d" >> .env
-            echo "RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}" >> .env
-            echo "AMADEUS_API_KEY=${{ secrets.AMADEUS_API_KEY }}" >> .env
-            echo "AMADEUS_API_SECRET=${{ secrets.AMADEUS_API_SECRET }}" >> .env
-            echo "FRONTEND_URL=https://sky-nav.net" >> .env
-            
-            # Setup PM2
-            npm install -g pm2
-            pm2 delete skynav-backend || true
-            pm2 start server.js --name skynav-backend
-            pm2 save
-            pm2 startup
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm ci --production
+
+    # ✅ Setup SSH properly (IMPORTANT)
+    - name: Setup SSH Agent
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+    - name: Add VPS to known_hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+    # ✅ Create backend folder if not exists
+    - name: Create backend directory on VPS
+      run: |
+        ssh root@${{ secrets.VPS_HOST }} "mkdir -p /var/www/skynav/backend"
+
+    # ✅ Upload backend files
+    - name: Upload backend files
+      run: |
+        rsync -avz --delete ./ root@${{ secrets.VPS_HOST }}:/var/www/skynav/backend
+
+    # ✅ Setup backend on VPS
+    - name: Configure and Restart Backend
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.VPS_HOST }}
+        username: root
+        key: ${{ secrets.VPS_SSH_KEY }}
+        script: |
+          cd /var/www/skynav/backend || exit 1
+
+          # Install production dependencies
+          npm install --production
+
+          # Create .env file
+          echo "NODE_ENV=production" > .env
+          echo "PORT=5000" >> .env
+          echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" >> .env
+          echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> .env
+          echo "JWT_EXPIRE=7d" >> .env
+          echo "FRONTEND_URL=https://sky-nav.net" >> .env
+
+          # Install PM2 if not installed
+          npm install -g pm2
+
+          # Restart App
+          pm2 delete skynav-backend || true
+          pm2 start server.js --name skynav-backend
+          pm2 save
+          pm2 startup
+
+          echo "✅ Backend deployed successfully!"
