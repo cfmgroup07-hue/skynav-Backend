@@ -42,3 +42,4 @@ jobs:
             pm2 delete skynav-backend || true
             pm2 start server.js --name skynav-backend
             pm2 save
+
