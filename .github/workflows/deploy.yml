@@ -42,9 +42,18 @@ jobs:
             # Install dependencies
             npm install --production
             
-            # Create .env file
-            cat > .env << EOF
+            # Create .env file using echo (NO YAML INDENTATION ISSUES)
+            echo "NODE_ENV=production" > .env
+            echo "PORT=5000" >> .env
+            echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" >> .env
+            echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> .env
+            echo "JWT_EXPIRE=7d" >> .env
+            echo "RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}" >> .env
+            echo "AMADEUS_API_KEY=${{ secrets.AMADEUS_API_KEY }}" >> .env
+            echo "AMADEUS_API_SECRET=${{ secrets.AMADEUS_API_SECRET }}" >> .env
+            echo "FRONTEND_URL=https://sky-nav.net" >> .env
             
+            # Setup PM2
             npm install -g pm2
             pm2 delete skynav-backend || true
             pm2 start server.js --name skynav-backend
